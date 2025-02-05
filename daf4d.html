@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>نظام DAF بضبط السرعة مع الحفاظ على النغمة</title>
+    <!-- استخدم إصدارًا مثبتًا مسبقًا من المكتبة -->
+    <script src="https://cdn.jsdelivr.net/npm/soundtouchjs@0.1.30/dist/soundtouch.min.js"></script>    <style>
+        /* نفس الأنماط السابقة */
+        body {
+            font-family: 'Arial', sans-serif;
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 20px;
+        }
+        .controls {
+            background: #f5f5f5;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            margin: 10px;
+            cursor: pointer;
+            background: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            transition: background 0.3s;
+        }
+        button:hover {
+            background: #1976D2;
+        }
+        button:disabled {
+            background: #9E9E9E;
+            cursor: not-allowed;
+        }
+        .slider-container {
+            margin: 15px 0;
+        }
+        input[type="range"] {
+            width: 250px;
+            margin: 0 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>نظام DAF - تغيير سرعة الصوت مع الحفاظ على النغمة</h1>
+    
+    <div class="controls">
+        <button id="startBtn">بدء التشغيل</button>
+        <button id="stopBtn" disabled>إيقاف التشغيل</button>
+        
+        <div class="slider-container">
+            <label>مدة التأخير: <span id="delayValue">0.20</span> ثانية</label><br>
+            <input type="range" id="delaySlider" min="0" max="1" step="0.01" value="0.2">
+        </div>
+
+        <div class="slider-container">
+            <label>سرعة التشغيل: <span id="speedValue">1.0</span>x</label><br>
+            <input type="range" id="speedSlider" min="0.5" max="2" step="0.1" value="1">
+        </div>
+    </div>
+
+    <script>
+        // التحقق من تحميل المكتبة
+        if (typeof soundtouch === 'undefined') {
+            alert('خطأ في تحميل مكتبة معالجة الصوت!');
+            throw new Error('المكتبة الصوتية غير محملة');
+        }
+
+        // العناصر الأساسية
+        let audioContext;
+        let mediaStream;
+        let processor;
+        const bufferSize = 2048;
+        let delayBuffer = [];
+
+        // عناصر التحكم في الواجهة
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const delaySlider = document.getElementById('delaySlider');
+        const speedSlider = document.getElementById('speedSlider');
+
+        // تهيئة الأحداث
+        startBtn.addEventListener('click', startProcessing);
+        stopBtn.addEventListener('click', stopProcessing);
+        delaySlider.addEventListener('input', updateDelay);
+        speedSlider.addEventListener('input', updateSpeed);
+
+        // معالجة البداية
+        async function startProcessing() {
+            try {
+                // إنشاء السياق الصوتي
+                if (!audioContext) {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                }
+                
+                // تفعيل السياق إذا كان معطلاً
+                if (audioContext.state === 'suspended') {
+                    await audioContext.resume();
+                }
+
+                // طلب إذن الميكروفون
+                mediaStream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        echoCancellation: false,
+                        noiseSuppression: false,
+                        autoGainControl: false
+                    }
+                });
+
+                // تهيئة معالج الصوت
+                const micSource = audioContext.createMediaStreamSource(mediaStream);
+                processor = audioContext.createScriptProcessor(bufferSize, 1, 1);
+
+                // تهيئة SoundTouch
+                const soundTouch = new soundtouch.SoundTouch(audioContext.sampleRate);
+                const soundSource = {
+                    extract: (target, numFrames) => {
+                        const frames = Math.min(numFrames, delayBuffer.length);
+                        for (let i = 0; i < frames; i++) target[i] = delayBuffer[i];
+                        delayBuffer.splice(0, frames);
+                        return frames;
+                    }
+                };
+                const filter = new soundtouch.SimpleFilter(soundSource, soundTouch);
+
+                // معالجة الصوت في الوقت الحقيقي
+                processor.onaudioprocess = (e) => {
+                    const input = e.inputBuffer.getChannelData(0);
+                    const output = e.outputBuffer.getChannelData(0);
+
+                    // إضافة البيانات الجديدة إلى المخزن المؤقت
+                    delayBuffer.push(...input);
+
+                    // حساب العينات المطلوبة للتأخير
+                    const requiredSamples = Math.floor(getCurrentDelay() * audioContext.sampleRate);
+                    
+                    if (delayBuffer.length >= requiredSamples) {
+                        // الحفاظ على الطول المطلوب
+                        delayBuffer = delayBuffer.slice(-requiredSamples);
+
+                        // تطبيق إعدادات الصوت
+                        soundTouch.tempo = getCurrentSpeed();
+
+                        // معالجة الصوت
+                        const processed = new Float32Array(bufferSize);
+                        const extracted = filter.extract(processed, bufferSize);
+
+                        // إخراج النتيجة
+                        output.set(processed.subarray(0, extracted));
+                        output.fill(0, extracted);
+                    } else {
+                        output.fill(0);
+                    }
+                };
+
+                // توصيل العناصر الصوتية
+                micSource.connect(processor);
+                processor.connect(audioContext.destination);
+
+                // تحديث واجهة المستخدم
+                toggleControls(true);
+            } catch (error) {
+                handleError(error);
+            }
+        }
+
+        // باقي الكود بدون تغيير ...
+        // (يجب الحفاظ على دوال stopProcessing و updateDelay و updateSpeed وغيرها كما هي)
+    </script>
+</body>
+</html>
