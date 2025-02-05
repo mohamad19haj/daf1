@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="ar">
+<head>
+  <meta charset="UTF-8">
+  <title>تجربة DAF مع تغيير سرعة التشغيل مع الحفاظ على الطبقة</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 30px;
+      direction: rtl;
+    }
+    label, button {
+      font-size: 1.2em;
+    }
+    input[type="range"] {
+      width: 300px;
+    }
+  </style>
+  <!-- تضمين مكتبة SoundTouch.js من شبكة CDN -->
+  <script src="https://unpkg.com/soundtouch-js/dist/soundtouch.min.js"></script>
+</head>
+<body>
+  <h1>تجربة DAF مع تغيير سرعة التشغيل مع الحفاظ على الطبقة</h1>
+  <p>
+    يلتقط التطبيق صوت الميكروفون ويعيد تشغيله بعد تأخير زمني قصير مع تغيير سرعة التشغيل مع الحفاظ على الطبقة.
+  </p>
+  <button id="startButton">بدء التسجيل</button>
+  <br><br>
+  <label for="delayTime">تأخير الصوت (ثواني): </label>
+  <input type="range" id="delayTime" min="0" max="1" step="0.01" value="0.2">
+  <span id="delayValue">0.20</span>
+  <br><br>
+  <label for="speedControl">سرعة التشغيل (الطبقة محفوظة): </label>
+  <input type="range" id="speedControl" min="0.5" max="2" step="0.1" value="1">
+  <span id="speedValue">1.0</span>
+
+  <script>
+    let audioContext;
+    // المتغيرات للتحكم في التأخير والسرعة
+    let delayTimeValue = parseFloat(document.getElementById('delayTime').value);
+    let playbackRateValue = parseFloat(document.getElementById('speedControl').value);
+
+    const startButton = document.getElementById('startButton');
+    const delaySlider = document.getElementById('delayTime');
+    const delayValueDisplay = document.getElementById('delayValue');
+    const speedSlider = document.getElementById('speedControl');
+    const speedValueDisplay = document.getElementById('speedValue');
+
+    // تحديث قيمة التأخير عند تغير شريط التمرير
+    delaySlider.addEventListener('input', () => {
+      delayTimeValue = parseFloat(delaySlider.value);
+      delayValueDisplay.textContent = delayTimeValue.toFixed(2);
+    });
+
+    // تحديث سرعة التشغيل عند تغير شريط التمرير
+    speedSlider.addEventListener('input', () => {
+      playbackRateValue = parseFloat(speedSlider.value);
+      speedValueDisplay.textContent = playbackRateValue.toFixed(1);
+      // سيتم استخدام القيمة في مكتبة SoundTouch أثناء المعالجة
+    });
+
+    // سيتم تخزين العينات هنا لتطبيق التأخير
+    let delayBuffer = [];
+
+    // حجم البافر المستخدم في ScriptProcessorNode (يمكن تعديله)
+    const BUFFER_SIZE = 2048;
+
+    startButton.addEventListener('click', async () => {
+      if (!audioContext) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const micSource = audioContext.createMediaStreamSource(stream);
+        
+        // إنشاء معالج ScriptProcessorNode لمعالجة الصوت في الوقت الحقيقي
+        const processorNode = audioContext.createScriptProcessor(BUFFER_SIZE, 1, 1);
+
+        // إعداد SoundTouch لمعالجة الوقت (مع الحفاظ على الطبقة)
+        const soundTouch = new soundtouch.SoundTouch(audioContext.sampleRate);
+        // تعيين قيمة tempo بناءً على شريط التحكم
+        soundTouch.tempo = playbackRateValue;
+
+        // الدالة التي ستستخدمها مكتبة SoundTouch لقراءة العينات
+        const source = {
+          extract: function(target, numFrames) {
+            // نسحب numFrames من delayBuffer
+            const framesExtracted = Math.min(numFrames, delayBuffer.length);
+            for (let i = 0; i < framesExtracted; i++) {
+              target[i] = delayBuffer[i];
+            }
+            // إزالة العينات التي تم استخراجها
+            delayBuffer.splice(0, framesExtracted);
+            return framesExtracted;
+          }
+        };
+
+        // إنشاء SimpleFilter لمعالجة العينات باستخدام SoundTouch
+        const filter = new soundtouch.SimpleFilter(source, soundTouch);
+
+        processorNode.onaudioprocess = function(e) {
+          const inputData = e.inputBuffer.getChannelData(0);
+          const outputData = e.outputBuffer.getChannelData(0);
+
+          // إضافة العينات الجديدة إلى مصفوفة التأخير
+          for (let i = 0; i < inputData.length; i++) {
+            delayBuffer.push(inputData[i]);
+          }
+
+          // حساب عدد العينات المطلوبة للتأخير
+          const delaySamples = delayTimeValue * audioContext.sampleRate;
+
+          // إذا توفرت عينات كافية لتطبيق التأخير
+          if (delayBuffer.length >= delaySamples) {
+            // إزالة العينات الزائدة لتحقيق التأخير المطلوب
+            // هذا يعني أننا نتجاهل بعض العينات لتطبيق التأخير
+            // (يمكن تعديل هذه الطريقة للحصول على نتائج أفضل)
+            delayBuffer.splice(0, delayBuffer.length - delaySamples);
+
+            // تحديث tempo في SoundTouch في كل مرة (لتتزامن مع قيمة شريط التحكم)
+            soundTouch.tempo = playbackRateValue;
+
+            // استخراج العينات المعالجة من مكتبة SoundTouch
+            const processed = new Float32Array(BUFFER_SIZE);
+            const framesExtracted = filter.extract(processed, BUFFER_SIZE);
+
+            // نسخ العينات المعالجة إلى مخرج الصوت
+            for (let i = 0; i < framesExtracted; i++) {
+              outputData[i] = processed[i];
+            }
+            // ملء بقية المخرج بالصفر إن وجدت
+            for (let i = framesExtracted; i < outputData.length; i++) {
+              outputData[i] = 0;
+            }
+          } else {
+            // إذا لم يتوفر التأخير الكافي، نخرج بصفر لتجنب ضوضاء غير مرغوبة
+            for (let i = 0; i < outputData.length; i++) {
+              outputData[i] = 0;
+            }
+          }
+        };
+
+        micSource.connect(processorNode);
+        processorNode.connect(audioContext.destination);
+
+        startButton.disabled = true;
+        startButton.textContent = "جارٍ التسجيل...";
+      } catch (err) {
+        console.error("حدث خطأ أثناء الوصول للميكروفون: ", err);
+        alert("تعذر الوصول إلى الميكروفون. تأكد من منح الإذن.");
+      }
+    });
+  </script>
+</body>
+</html>
